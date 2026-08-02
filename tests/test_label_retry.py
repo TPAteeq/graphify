@@ -44,3 +44,35 @@ def test_label_batch_recovers_via_split_on_invalid_json(monkeypatch):
 
     assert result == {42: "Label 42", 99: "Label 99", 137: "Label 137", 201: "Label 201"}
     assert call_count["n"] >= 2
+
+
+def _capture_label_budget(monkeypatch, *, backend, model, cids):
+    """Run one labeling call and return the max_tokens it budgeted."""
+    monkeypatch.delenv("GRAPHIFY_MAX_OUTPUT_TOKENS", raising=False)
+    seen: dict = {}
+
+    def fake_call_llm(prompt: str, **kwargs) -> str:
+        seen["max_tokens"] = kwargs.get("max_tokens")
+        ids = [int(m) for m in re.findall(r"Community (\d+):", prompt)]
+        return json.dumps({str(c): f"Label {c}" for c in ids})
+
+    monkeypatch.setattr(llm_mod, "_call_llm", fake_call_llm)
+    lines = [f"Community {c}: sym_a, sym_b" for c in cids]
+    llm_mod._label_batch_with_retry(cids, lines, backend=backend, model=model)
+    return seen["max_tokens"]
+
+
+def test_reasoning_model_gets_generous_label_budget(monkeypatch):
+    # gpt-5 / o-series spend completion tokens on hidden reasoning first, so the
+    # tight 256+48*n budget starved them and the pass degraded to "Community N".
+    # They now get the generous 16384 budget (mirrors extract).
+    assert _capture_label_budget(
+        monkeypatch, backend="openai", model="gpt-5.6-terra", cids=[1]
+    ) == 16384
+
+
+def test_classic_model_keeps_the_tight_label_budget(monkeypatch):
+    # A non-reasoning model keeps the cheap, tuned formula.
+    assert _capture_label_budget(
+        monkeypatch, backend="gemini", model="gemini-2.5-flash", cids=[1, 2, 3]
+    ) == 256 + 48 * 3
