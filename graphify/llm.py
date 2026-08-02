@@ -2922,7 +2922,20 @@ def _label_batch_with_retry(
     # gemini) often prepend a short preamble or reasoning that eats the
     # completion and truncates the JSON mid-object, which used to fail the whole
     # batch (#1690). The old 64 + 24*n floor left no headroom.
-    max_tokens = _resolve_max_tokens(min(256 + 48 * len(batch_cids), 8192))
+    #
+    # Reasoning models (gpt-5 family, o-series) go further: they spend completion
+    # tokens on hidden reasoning BEFORE any content, so the tuned 256+48*n budget
+    # starves them -- content returns empty (finish_reason "length"),
+    # _parse_label_response raises, and the whole pass silently degrades to
+    # "Community N". The split-retry made it worse by shrinking the budget on each
+    # halving. Give reasoning models the generous budget extract already uses
+    # (they price output the same); keep the tight, cheap formula for classic
+    # models where it works well.
+    effective_model = model or _default_model_for_backend(backend)
+    if _model_requires_default_temperature(effective_model):
+        max_tokens = _resolve_max_tokens(16384)
+    else:
+        max_tokens = _resolve_max_tokens(min(256 + 48 * len(batch_cids), 8192))
     call_kwargs: dict = {"backend": backend, "max_tokens": max_tokens}
     if model is not None:
         call_kwargs["model"] = model
